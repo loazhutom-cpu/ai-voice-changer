@@ -1,0 +1,34 @@
+{
+  "appId": "com.aivoicechanger.app",
+  "productName": "AI Voice Changer Studio",
+  "directories": {
+    "output": "dist"
+  },
+  "files": [
+    "out/**/*"
+  ],
+  "mac": {
+    "target": [
+      "dmg",
+      "zip"
+    ],
+    "category": "public.app-category.music"
+  },
+  "win": {
+    "target": [
+      "nsis",
+      "portable"
+    ]
+  },
+  "linux": {
+    "target": [
+      "AppImage",
+      "deb"
+    ],
+    "category": "Audio"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}

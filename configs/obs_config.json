@@ -1,0 +1,19 @@
+{
+  "websocket": {
+    "host": "localhost",
+    "port": 4455,
+    "password": "YOUR_OBS_WEBSOCKET_PASSWORD_HERE",
+    "auto_connect": true,
+    "reconnect_interval_seconds": 5.0,
+    "max_reconnect_attempts": 10
+  },
+  "obs_settings": {
+    "target_source_name": "Mic/Aux",
+    "audio_monitoring": {
+      "auto_enable": true,
+      "monitoring_type": "MONITOR_AND_OUTPUT"
+    },
+    "default_volume_db": 0.0,
+    "sync_preset_changes": true
+  }
+}

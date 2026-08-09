@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  ai-voice-changer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-voice-changer
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+      - "8000:8000"
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+      - PULSE_SERVER=unix:/tmp/pulseaudio.socket
+      - PULSE_COOKIE=/tmp/pulseaudio.cookie
+    volumes:
+      # Persistent model weights & preset files
+      - ./models:/app/models
+      - ./app/presets/user_presets:/app/app/presets/user_presets
+      - ./configs:/app/configs
+      # PulseAudio IPC socket mapping for host audio passthrough (Linux)
+      - /run/user/1000/pulse/native:/tmp/pulseaudio.socket:ro
+      - ~/.config/pulse/cookie:/tmp/pulseaudio.cookie:ro
+    devices:
+      # Map host sound card devices to container
+      - "/dev/snd:/dev/snd"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility]
+
+networks:
+  default:
+    name: voice-changer-network

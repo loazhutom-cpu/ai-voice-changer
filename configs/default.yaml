@@ -1,0 +1,54 @@
+audio:
+  sample_rate: 48000
+  chunk_size: 2048
+  buffer_size: 4096
+  channels: 1
+  input_device: null
+  output_device: null
+
+engine:
+  model_path: "ai-engine/models/presets/default.pth"
+  device: "auto"
+  pitch_shift: 0.0
+  index_rate: 0.75
+  filter_radius: 3
+  resample_sr: 0
+
+noise_suppression:
+  enabled: true
+  mode: "spectral_gating"
+  prop_decrease: 0.85
+  stationary: true
+
+effects:
+  enabled: true
+  compressor:
+    enabled: true
+    threshold_db: -16.0
+    ratio: 3.0
+    attack_ms: 10.0
+    release_ms: 100.0
+  de_esser:
+    enabled: true
+    threshold_db: -20.0
+    frequency_hz: 6000.0
+  eq:
+    enabled: true
+    low_gain_db: 0.0
+    mid_gain_db: 1.5
+    high_gain_db: 2.0
+  reverb:
+    enabled: false
+    room_size: 0.25
+    wet_level: 0.15
+    dry_level: 0.85
+    damping: 0.5
+  limiter:
+    enabled: true
+    threshold_db: -1.0
+    release_ms: 50.0
+
+server:
+  host: "0.0.0.0"
+  port: 7860
+  cors_origins: ["*"]

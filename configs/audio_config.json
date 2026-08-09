@@ -1,0 +1,40 @@
+{
+  "audio_processing": {
+    "sample_rate": 48000,
+    "channels": 1,
+    "buffer_size": 512,
+    "hop_length": 128,
+    "latency_mode": "low_latency",
+    "noise_suppression": {
+      "enabled": true,
+      "method": "deepfilter",
+      "attenuation_db": -20.0
+    },
+    "voice_conversion": {
+      "inference_device": "cuda",
+      "f0_method": "rmvpe",
+      "index_rate": 0.75,
+      "protect": 0.33
+    }
+  },
+  "platform_devices": {
+    "win32": {
+      "default_input": "Microphone (Realtek High Definition Audio)",
+      "virtual_output": "CABLE Input (VB-Audio Virtual Cable)",
+      "driver_type": "WASAPI",
+      "exclusive_mode": false
+    },
+    "darwin": {
+      "default_input": "MacBook Pro Microphone",
+      "virtual_output": "BlackHole 2ch",
+      "driver_type": "CoreAudio",
+      "exclusive_mode": false
+    },
+    "linux": {
+      "default_input": "default",
+      "virtual_output": "AI_Voice_Changer_Sink",
+      "driver_type": "PulseAudio/PipeWire",
+      "exclusive_mode": false
+    }
+  }
+}
