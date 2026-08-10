@@ -1,8 +1,9 @@
 """
 RVC (Retrieval-based Voice Conversion) Engine Wrapper.
 
-Provides real-time voice conversion capabilities using PyTorch, feature retrieval,
-and pitch adjustment algorithms with CUDA GPU support and CPU fallback.
+Provides real-time voice conversion using PyTorch with pitch extraction,
+content feature extraction, and neural synthesis with CUDA GPU support
+and CPU fallback.
 """
 
 import logging
@@ -12,69 +13,91 @@ from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import scipy.signal
-import torch
-import torch.nn as nn
+
+try:
+    import torch
+    import torch.nn as nn
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+
+try:
+    from ai_engine.inference.pitch_extractor import PitchExtractor
+    from ai_engine.inference.feature_extractor import FeatureExtractor
+except ImportError:
+    try:
+        from ..inference.pitch_extractor import PitchExtractor
+        from ..inference.feature_extractor import FeatureExtractor
+    except ImportError:
+        from inference.pitch_extractor import PitchExtractor
+        from inference.feature_extractor import FeatureExtractor
 
 logger = logging.getLogger(__name__)
 
 
-class SyntheticRVCSynthesizer(nn.Module):
-    """
-    Synthesizer model scaffold representing an RVC Generator architecture (SynthesizerTrn).
-    Converts acoustic features (ContentVec / HuBERT embeddings) and pitch (f0)
-    into converted audio waveforms via Torch neural network layers.
-    """
-
-    def __init__(self, feature_dim: int = 256, hidden_dim: int = 192):
-        super().__init__()
-        self.feature_dim = feature_dim
-        self.emb_phone = nn.Linear(feature_dim, hidden_dim)
-        self.emb_pitch = nn.Embedding(256, hidden_dim)
-        self.conv_pre = nn.Conv1d(hidden_dim, 256, kernel_size=5, padding=2)
-        self.res_blocks = nn.Sequential(
-            nn.Conv1d(256, 256, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv1d(256, 128, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv1d(128, 1, kernel_size=7, padding=3),
-        )
-        self.tanh = nn.Tanh()
-
-    def forward(self, phone_features: torch.Tensor, pitch: torch.Tensor) -> torch.Tensor:
+if HAS_TORCH:
+    class SyntheticRVCSynthesizer(nn.Module):
         """
-        Forward pass for synthesis.
+        RVC Generator model (SynthesizerTrn-style).
 
-        Args:
-            phone_features: Tensor of shape (batch, sequence_length, feature_dim)
-            pitch: Pitch contour Tensor (batch, sequence_length)
-
-        Returns:
-            Generated audio waveform tensor of shape (batch, samples)
+        Converts content features and pitch contour into converted audio
+        via convolutional neural network layers.
         """
-        x = self.emb_phone(phone_features).transpose(1, 2)
-        pitch_clamped = torch.clamp(pitch.long(), 0, 255)
-        pitch_emb = self.emb_pitch(pitch_clamped).transpose(1, 2)
-        x = x + pitch_emb
-        x = self.conv_pre(x)
-        x = self.res_blocks(x)
-        return self.tanh(x).squeeze(1)
+
+        def __init__(self, feature_dim: int = 256, hidden_dim: int = 192):
+            super().__init__()
+            self.feature_dim = feature_dim
+            self.emb_phone = nn.Linear(feature_dim, hidden_dim)
+            self.emb_pitch = nn.Embedding(256, hidden_dim)
+            self.conv_pre = nn.Conv1d(hidden_dim, 256, kernel_size=5, padding=2)
+            self.res_blocks = nn.Sequential(
+                nn.Conv1d(256, 256, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv1d(256, 128, kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv1d(128, 1, kernel_size=7, padding=3),
+            )
+            self.tanh = nn.Tanh()
+
+        def forward(self, phone_features: torch.Tensor, pitch: torch.Tensor) -> torch.Tensor:
+            """
+            Forward pass for voice synthesis.
+
+            Args:
+                phone_features: (batch, seq_len, feature_dim) content embeddings
+                pitch: (batch, seq_len) pitch contour in MIDI note values
+
+            Returns:
+                (batch, samples) generated audio waveform
+            """
+            x = self.emb_phone(phone_features).transpose(1, 2)
+            pitch_clamped = torch.clamp(pitch.long(), 0, 255)
+            pitch_emb = self.emb_pitch(pitch_clamped).transpose(1, 2)
+            x = x + pitch_emb
+            x = self.conv_pre(x)
+            x = self.res_blocks(x)
+            return self.tanh(x).squeeze(1)
 
 
 class RVCEngine:
     """
-    Retrieval-based Voice Conversion wrapper class.
+    Retrieval-based Voice Conversion engine.
 
-    Handles loading RVC voice models, extracting pitch/content features,
-    performing feature retrieval index matching, and performing real-time conversion.
+    Handles model loading, feature extraction (content + pitch),
+    neural synthesis, and pitch shifting with GPU acceleration.
     """
 
-    def __init__(self, models_dir: Union[str, Path] = "ai-engine/models/presets", default_pitch_shift: float = 0.0):
+    def __init__(
+        self,
+        models_dir: Union[str, Path] = "ai-engine/models/presets",
+        default_pitch_shift: float = 0.0
+    ):
         """
         Initialize RVC Engine.
 
         Args:
             models_dir: Directory containing trained voice models (.pth files)
-            default_pitch_shift: Default pitch shift in semitones (-12 to +12)
+            default_pitch_shift: Default pitch shift in semitones (-24 to +24)
         """
         self.models_dir = Path(models_dir)
         self.pitch_shift: float = default_pitch_shift
@@ -82,36 +105,53 @@ class RVCEngine:
         self.current_voice_name: Optional[str] = None
         self.is_loaded: bool = False
 
-        # Detect CUDA GPU device with automatic CPU fallback
-        if torch.cuda.is_available():
+        # Device detection with CPU fallback
+        if HAS_TORCH and torch.cuda.is_available():
             self.device = torch.device("cuda")
-            device_name = torch.cuda.get_device_name(0)
-            logger.info(f"RVC Engine initialized using CUDA GPU: {device_name}")
-        else:
+            gpu_name = torch.cuda.get_device_name(0)
+            logger.info(f"RVC Engine using CUDA GPU: {gpu_name}")
+        elif HAS_TORCH:
             self.device = torch.device("cpu")
-            logger.info("RVC Engine initialized using CPU fallback")
+            logger.info("RVC Engine using CPU")
+        else:
+            self.device = None
+            logger.warning("PyTorch not available. RVC Engine in fallback mode.")
 
-        self.model: Optional[nn.Module] = None
+        self.model: Optional[Any] = None
         self.index_file: Optional[Path] = None
+
+        # Initialize feature extractors
+        self.pitch_extractor = PitchExtractor(method="autocorrelation")
+        self.feature_extractor = FeatureExtractor(feature_dim=256, device=str(self.device) if self.device else None)
+
         self._initialize_default_model()
 
     def _initialize_default_model(self) -> None:
-        """Instantiate default internal model architecture."""
-        self.model = SyntheticRVCSynthesizer().to(self.device)
-        self.model.eval()
+        """Instantiate default model architecture."""
+        if HAS_TORCH:
+            self.model = SyntheticRVCSynthesizer().to(self.device)
+            self.model.eval()
+        else:
+            self.model = None
 
     def load_model(self, model_path: Union[str, Path]) -> bool:
         """
-        Load an RVC voice model checkpoint from path.
+        Load an RVC voice model checkpoint.
 
         Args:
             model_path: Path to the .pth or .onnx voice model file
 
         Returns:
-            True if model loaded successfully, False otherwise
+            True if loaded successfully, False otherwise
         """
         path = Path(model_path)
-        logger.info(f"Loading RVC model from {path} onto device {self.device}")
+        logger.info(f"Loading RVC model from {path}")
+
+        if not HAS_TORCH:
+            logger.warning("PyTorch unavailable — cannot load model weights")
+            self.current_voice_name = path.stem
+            self.is_loaded = True
+            return True
 
         try:
             if path.exists() and path.suffix in [".pth", ".pt"]:
@@ -120,44 +160,47 @@ class RVCEngine:
                     self.model.load_state_dict(checkpoint["model"], strict=False)
                 elif isinstance(checkpoint, dict) and "weight" in checkpoint:
                     self.model.load_state_dict(checkpoint["weight"], strict=False)
+                else:
+                    self.model.load_state_dict(checkpoint, strict=False)
                 logger.info(f"Loaded checkpoint weights from {path}")
             else:
-                logger.warning(f"Model file {path} not found or invalid. Using default synth model.")
+                logger.warning(f"Model file {path} not found. Using default synth model.")
 
             self.current_model_path = path
             self.current_voice_name = path.stem
             self.is_loaded = True
 
-            # Look for matching feature index file (.index)
+            # Look for matching feature retrieval index file
             possible_index = path.with_suffix(".index")
             if possible_index.exists():
                 self.index_file = possible_index
-                logger.info(f"Associated index file loaded: {possible_index}")
+                logger.info(f"Associated index file: {possible_index}")
             else:
                 self.index_file = None
 
             return True
+
         except Exception as e:
-            logger.error(f"Error loading RVC model from {path}: {e}", exc_info=True)
+            logger.error(f"Error loading RVC model: {e}", exc_info=True)
             self.is_loaded = False
             return False
 
     def set_pitch_shift(self, semitones: float) -> None:
         """
-        Set pitch shift transposition value.
+        Set pitch shift in semitones.
 
         Args:
-            semitones: Number of semitones to shift (-24.0 to +24.0)
+            semitones: Shift amount (-24.0 to +24.0)
         """
-        self.pitch_shift = float(clamp(semitones, -24.0, 24.0))
-        logger.debug(f"Pitch shift updated to {self.pitch_shift} semitones")
+        self.pitch_shift = float(np.clip(semitones, -24.0, 24.0))
+        logger.debug(f"Pitch shift set to {self.pitch_shift} semitones")
 
     def get_available_voices(self) -> List[Dict[str, Any]]:
         """
-        Scan models directory and return list of available voice presets.
+        List all available voice model presets.
 
         Returns:
-            List of dictionaries containing voice details (name, path, size_mb, has_index)
+            List of voice info dicts (id, name, path, has_index, size_mb, is_active)
         """
         voices = []
         if not self.models_dir.exists():
@@ -171,11 +214,10 @@ class RVCEngine:
                 "path": str(file_path),
                 "has_index": index_path.exists(),
                 "size_mb": round(file_path.stat().st_size / (1024 * 1024), 2),
-                "is_active": (str(file_path) == str(self.current_model_path))
+                "is_active": str(file_path) == str(self.current_model_path)
             })
 
         if not voices:
-            # Provide default virtual voice preset entry if directory is empty
             voices.append({
                 "id": "default_voice",
                 "name": "Default Studio Voice",
@@ -195,60 +237,76 @@ class RVCEngine:
         sample_rate: int = 48000
     ) -> np.ndarray:
         """
-        Convert an incoming raw PCM audio chunk to target voice characteristics.
+        Convert audio chunk to target voice.
+
+        Pipeline: feature extraction → pitch extraction → pitch shift →
+                  neural synthesis → resample to match input length.
 
         Args:
-            audio_chunk: 1D or 2D numpy array of audio samples (float32, normalized [-1, 1])
-            target_voice: Optional voice ID / path to switch target model
-            pitch_shift: Optional pitch shift override in semitones
-            sample_rate: Audio sampling rate in Hz (default 48000)
+            audio_chunk: Input audio (float32, normalized [-1, 1])
+            target_voice: Optional voice ID to switch to
+            pitch_shift: Optional pitch override in semitones
+            sample_rate: Audio sample rate in Hz
 
         Returns:
-            Converted audio numpy array of shape matching input chunk
+            Converted audio numpy array matching input length
         """
         if audio_chunk is None or len(audio_chunk) == 0:
             return np.zeros(0, dtype=np.float32)
 
-        # Handle stereo to mono conversion for model inference
         original_shape = audio_chunk.shape
+
+        # Handle stereo → mono
         if audio_chunk.ndim > 1:
             mono_audio = np.mean(audio_chunk, axis=1)
         else:
             mono_audio = audio_chunk
 
-        # Apply target voice switch if provided and different
+        # Ensure float32
+        mono_audio = mono_audio.astype(np.float32)
+
+        # Switch voice model if requested
         if target_voice and target_voice != self.current_voice_name:
             target_path = self.models_dir / f"{target_voice}.pth"
-            if target_path.exists():
+            if target_path.exists() or target_voice == "default_voice":
                 self.load_model(target_path)
 
         shift = pitch_shift if pitch_shift is not None else self.pitch_shift
 
-        # Convert to PyTorch Tensor on target hardware device
-        tensor_audio = torch.from_numpy(mono_audio).float().to(self.device)
+        # Step 1: Extract content features
+        content_features = self.feature_extractor.extract(mono_audio, sample_rate)
 
+        # Step 2: Extract pitch (F0) and apply pitch shift
+        f0_contour = self.pitch_extractor.extract_f0(mono_audio, sample_rate)
+        f0_shifted = self.pitch_extractor.apply_pitch_shift(f0_contour, shift)
+        midi_contour = self.pitch_extractor.hz_to_midi(f0_shifted)
+
+        # Resample contours to match feature frames
+        num_frames = content_features.shape[0]
+        midi_resampled = self.pitch_extractor.resample_contour(midi_contour, num_frames)
+
+        if not HAS_TORCH or self.model is None:
+            # Fallback: pitch-shifted passthrough (no neural conversion)
+            return self._pitch_shift_passthrough(mono_audio, shift, sample_rate, original_shape)
+
+        # Step 3: Neural synthesis
         with torch.no_grad():
-            # Step 1: Feature Extraction / Resampling
-            num_frames = max(1, len(mono_audio) // 160)
-            phone_features = torch.randn(1, num_frames, 256, device=self.device)
+            features_tensor = torch.from_numpy(content_features).float().unsqueeze(0).to(self.device)
+            pitch_tensor = torch.from_numpy(midi_resampled).float().unsqueeze(0).to(self.device)
 
-            # Step 2: Pitch estimation (F0) with semitone shifting
-            base_pitch = 100 + int(shift * 5)
-            pitch_contour = torch.full((1, num_frames), base_pitch, dtype=torch.float32, device=self.device)
-
-            # Step 3: Neural Synthesizer inference pass
-            out_tensor = self.model(phone_features, pitch_contour)
+            out_tensor = self.model(features_tensor, pitch_tensor)
             converted_mono = out_tensor.cpu().numpy().squeeze()
 
-            # Resample / match output sequence length exactly
-            if len(converted_mono) != len(mono_audio):
-                converted_mono = scipy.signal.resample(converted_mono, len(mono_audio))
+        # Step 4: Resample output to match input length exactly
+        if len(converted_mono) != len(mono_audio):
+            converted_mono = scipy.signal.resample(converted_mono, len(mono_audio))
 
-        # Apply pitch shifting post-processing if needed using phase vocoder/resampling
-        if shift != 0.0:
-            converted_mono = self._apply_pitch_shift_dsp(converted_mono, shift, sample_rate)
+        # Normalize to prevent clipping
+        max_val = np.max(np.abs(converted_mono))
+        if max_val > 1.0:
+            converted_mono = converted_mono / max_val
 
-        # Restore original channel layout if input was multi-channel
+        # Restore channel layout
         if len(original_shape) > 1 and original_shape[1] > 1:
             converted_audio = np.column_stack([converted_mono] * original_shape[1])
         else:
@@ -256,18 +314,53 @@ class RVCEngine:
 
         return converted_audio.astype(np.float32)
 
-    def _apply_pitch_shift_dsp(self, audio: np.ndarray, semitones: float, sample_rate: int) -> np.ndarray:
-        """DSP-based pitch shifting fallback/refinement using resample and pitch ratio."""
-        if semitones == 0.0 or len(audio) == 0:
-            return audio
+    def _pitch_shift_passthrough(
+        self,
+        audio: np.ndarray,
+        semitones: float,
+        sample_rate: int,
+        original_shape: tuple
+    ) -> np.ndarray:
+        """
+        Fallback pitch shifting without neural conversion.
 
-        factor = 2.0 ** (semitones / 12.0)
-        num_samples = len(audio)
-        resampled = scipy.signal.resample(audio, int(num_samples / factor))
-        shifted = scipy.signal.resample(resampled, num_samples)
-        return shifted.astype(np.float32)
+        Uses scipy signal processing for time-domain pitch shifting
+        when the neural model is unavailable.
+        """
+        if semitones == 0:
+            result = audio
+        else:
+            # Simple resampling-based pitch shift
+            ratio = 2.0 ** (-semitones / 12.0)
+            new_length = int(len(audio) * ratio)
+            if new_length > 0:
+                resampled = scipy.signal.resample(audio, new_length)
+                # Trim or pad to match original length
+                if len(resampled) > len(audio):
+                    resampled = resampled[:len(audio)]
+                else:
+                    resampled = np.pad(resampled, (0, len(audio) - len(resampled)))
+                result = resampled.astype(np.float32)
+            else:
+                result = audio
 
+        if len(original_shape) > 1 and original_shape[1] > 1:
+            result = np.column_stack([result] * original_shape[1])
 
-def clamp(val: float, min_val: float, max_val: float) -> float:
-    """Helper utility to clamp values within range."""
-    return max(min_val, min(max_val, val))
+        return result.astype(np.float32)
+
+    def get_device_info(self) -> Dict[str, Any]:
+        """Get current device and model status for diagnostics."""
+        info = {
+            "has_torch": HAS_TORCH,
+            "device": str(self.device) if self.device else "none",
+            "model_loaded": self.is_loaded,
+            "current_voice": self.current_voice_name or "none",
+            "pitch_shift": self.pitch_shift,
+        }
+        if HAS_TORCH and torch.cuda.is_available():
+            info["gpu_name"] = torch.cuda.get_device_name(0)
+            info["gpu_memory_allocated_mb"] = round(
+                torch.cuda.memory_allocated() / (1024 * 1024), 2
+            )
+        return info
