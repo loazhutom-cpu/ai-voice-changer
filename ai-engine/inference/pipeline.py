@@ -1,8 +1,9 @@
 """
 Main Audio Processing Pipeline Orchestrator.
 
-Chains noise suppression, RVC voice conversion, pedalboard effects, and low-latency audio stream routing.
-Provides a unified API for starting, stopping, querying status, and updating settings.
+Chains noise suppression, gain control, RVC voice conversion, pedalboard effects,
+and low-latency audio routing. Provides a unified API for start/stop, preset switching,
+settings updates, and real-time status queries.
 """
 
 import logging
@@ -10,13 +11,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 try:
+    from ai_engine.inference.gain_control import GainController
     from ai_engine.rvc.rvc_engine import RVCEngine
     from ai_engine.rvc.rvc_inference import RealtimeRVCInference
 except ImportError:
     try:
+        from ..inference.gain_control import GainController
         from ..rvc.rvc_engine import RVCEngine
         from ..rvc.rvc_inference import RealtimeRVCInference
     except ImportError:
+        from inference.gain_control import GainController
         from rvc.rvc_engine import RVCEngine
         from rvc.rvc_inference import RealtimeRVCInference
 
@@ -28,10 +32,10 @@ logger = logging.getLogger(__name__)
 
 class AudioPipeline:
     """
-    Main Audio Processing Pipeline Orchestrator.
+    Main audio processing pipeline orchestrator.
 
-    Integrates RVC Engine, Noise Suppressor, Audio Effects, and real-time audio streams.
-    Runs streaming processing inside background threads.
+    Integrates RVC Engine, Noise Suppressor, Gain Controller, Audio Effects,
+    and real-time streaming into a unified control interface.
     """
 
     def __init__(
@@ -41,44 +45,32 @@ class AudioPipeline:
         chunk_size: int = 2048,
         buffer_size: int = 8192
     ):
-        """
-        Initialize Audio Pipeline.
-
-        Args:
-            config_path: Path to default YAML configuration
-            sample_rate: Audio sampling frequency in Hz
-            chunk_size: Processing audio chunk frame size
-            buffer_size: Circular audio buffer frame capacity
-        """
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self.buffer_size = buffer_size
 
-        # Core Pipeline Components
+        # Core components
         self.rvc_engine = RVCEngine()
         self.noise_suppressor = NoiseSuppressor()
         self.effects_chain = AudioEffectsChain()
+        self.gain_controller = GainController()
 
-        # Real-time Streaming Worker
+        # Real-time streaming worker
         self.inference_worker = RealtimeRVCInference(
             rvc_engine=self.rvc_engine,
             noise_suppressor=self.noise_suppressor,
             effects_chain=self.effects_chain,
+            gain_controller=self.gain_controller,
             sample_rate=self.sample_rate,
             chunk_size=self.chunk_size,
             buffer_size=self.buffer_size
         )
 
         self.current_preset: str = "default_voice"
-        logger.info("AudioPipeline orchestrator initialized successfully.")
+        logger.info("AudioPipeline orchestrator initialized.")
 
     def start(self) -> Dict[str, Any]:
-        """
-        Start real-time audio capture, conversion, and playback pipeline.
-
-        Returns:
-            Dict containing status and current operational parameters
-        """
+        """Start the real-time pipeline."""
         logger.info("Starting AudioPipeline...")
         self.inference_worker.start()
         return {
@@ -89,82 +81,61 @@ class AudioPipeline:
         }
 
     def stop(self) -> Dict[str, Any]:
-        """
-        Stop real-time audio processing pipeline.
-
-        Returns:
-            Dict containing status report
-        """
+        """Stop the real-time pipeline."""
         logger.info("Stopping AudioPipeline...")
         self.inference_worker.stop()
         return {"status": "stopped"}
 
     def is_running(self) -> bool:
-        """Check if conversion pipeline is currently active."""
+        """Check if pipeline is active."""
         return self.inference_worker.is_running()
 
     def set_voice_preset(self, preset_id: str) -> bool:
-        """
-        Switch active voice model preset.
-
-        Args:
-            preset_id: Voice identifier or file path stem
-
-        Returns:
-            True if switch succeeded, False otherwise
-        """
+        """Switch active voice model preset."""
         logger.info(f"Switching voice preset to: {preset_id}")
+        if preset_id == "default_voice":
+            self.current_preset = preset_id
+            return True
         success = self.rvc_engine.load_model(f"ai-engine/models/presets/{preset_id}.pth")
-        if success or preset_id == "default_voice":
+        if success:
             self.current_preset = preset_id
             return True
         return False
 
     def set_pitch_shift(self, semitones: float) -> None:
-        """
-        Set pitch transposition shift in semitones.
-
-        Args:
-            semitones: Semitone offset (-24.0 to +24.0)
-        """
+        """Set pitch shift in semitones (-24 to +24)."""
         self.rvc_engine.set_pitch_shift(semitones)
 
     def get_latency(self) -> Dict[str, float]:
-        """
-        Get breakdown of current latency statistics in milliseconds.
-
-        Returns:
-            Dict containing chunk_buffer_ms, processing_ms, total_latency_ms
-        """
+        """Get latency breakdown in milliseconds."""
         return self.inference_worker.get_latency_stats()
 
     def get_audio_levels(self) -> Dict[str, float]:
-        """
-        Get current real-time input and output audio levels for UI meters.
-
-        Returns:
-            Dict containing RMS levels and dB readings
-        """
+        """Get current audio levels for UI meters."""
         return self.inference_worker.get_audio_levels()
 
     def get_available_voices(self) -> List[Dict[str, Any]]:
-        """
-        List all available voice model presets.
-
-        Returns:
-            List of preset dict objects
-        """
+        """List available voice presets."""
         return self.rvc_engine.get_available_voices()
+
+    def get_device_info(self) -> Dict[str, Any]:
+        """Get GPU/device diagnostics."""
+        return self.rvc_engine.get_device_info()
+
+    def set_ptt_enabled(self, enabled: bool) -> None:
+        """Enable or disable push-to-talk mode."""
+        self.inference_worker.set_ptt_enabled(enabled)
+
+    def set_ptt_active(self, active: bool) -> None:
+        """Set push-to-talk transmit state."""
+        self.inference_worker.set_ptt_active(active)
 
     def update_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Update runtime audio settings (effects, gain, devices, noise suppression).
+        Update runtime audio settings.
 
-        Args:
-            settings: Dictionary of parameter updates
-
-        Returns:
-            Updated configuration dictionary
+        Supports: pitch_shift, noise_suppression, effects, gain, input_device,
+        output_device, ptt_enabled.
         """
         if "pitch_shift" in settings:
             self.set_pitch_shift(float(settings["pitch_shift"]))
@@ -179,16 +150,33 @@ class AudioPipeline:
         if "effects" in settings:
             self.effects_chain.update_config(settings["effects"])
 
+        if "gain" in settings:
+            gain_cfg = settings["gain"]
+            if isinstance(gain_cfg, dict):
+                if "mode" in gain_cfg:
+                    self.gain_controller.set_mode(gain_cfg["mode"])
+                if "manual_gain_db" in gain_cfg:
+                    self.gain_controller.set_manual_gain(gain_cfg["manual_gain_db"])
+                if "noise_gate_enabled" in gain_cfg:
+                    self.gain_controller.noise_gate_enabled = bool(gain_cfg["noise_gate_enabled"])
+            elif isinstance(gain_cfg, (int, float)):
+                self.gain_controller.set_manual_gain(float(gain_cfg))
+
         if "input_device" in settings:
             self.inference_worker.input_device = settings["input_device"]
 
         if "output_device" in settings:
             self.inference_worker.output_device = settings["output_device"]
 
+        if "ptt_enabled" in settings:
+            self.set_ptt_enabled(bool(settings["ptt_enabled"]))
+
         return {
             "status": "updated",
             "is_running": self.is_running(),
             "pitch_shift": self.rvc_engine.pitch_shift,
             "noise_suppression_enabled": self.noise_suppressor.enabled,
-            "effects_enabled": self.effects_chain.enabled
+            "effects_enabled": self.effects_chain.enabled,
+            "gain_state": self.gain_controller.get_state(),
+            "ptt_enabled": self.inference_worker._ptt_enabled
         }
